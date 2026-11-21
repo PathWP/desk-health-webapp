@@ -13,8 +13,12 @@ const AppState = {
   analytics:{daily:null,weekly:null,loadedAt:0},
   logs:[],
   loadSettings(){
-    try { const v=JSON.parse(localStorage.getItem(APP_CONFIG.STORAGE_KEY)||"{}"); this.settings={...APP_CONFIG.DEFAULTS,...v}; }
-    catch(e){console.warn("Settings load:",e);}
+    try {
+      const v = JSON.parse(localStorage.getItem(APP_CONFIG.STORAGE_KEY) || "{}");
+      if (!v.tbDeviceId) delete v.tbDeviceId;
+      this.settings = { ...APP_CONFIG.DEFAULTS, ...v };
+    }
+    catch(e){ console.warn("Settings load:", e); }
   },
   saveSettings(){try{localStorage.setItem(APP_CONFIG.STORAGE_KEY,JSON.stringify(this.settings));}catch(e){console.warn(e);}}
 };

@@ -67,17 +67,26 @@ const ThingsBoardAPI = {
       try{
         const m=JSON.parse(ev.data);
         if(m.errorCode&&m.errorCode!==0){console.error("TB WS:",m);return;}
-        let rows=m.data?.data||m.update?.data||[];
+        // แก้ไขจุดนี้: รองรับ m.update ที่ส่งมาเป็น Array โดยตรง
+        let rows=m.data?.data||(Array.isArray(m.update)?m.update:m.update?.data)||[];
         if(!Array.isArray(rows)&&m.update&&typeof m.update==="object"){
           rows=Object.values(m.update).map(v=>v?.latest? v : ({latest:v?.TIME_SERIES? v : v}));
         }
-        if(!Array.isArray(rows)&&m.data?.data)rows=m.data.data;
         rows.forEach(row=>{
           const latest=row.latest?.TIME_SERIES||row.latest||row.TIME_SERIES||row;
           const update=row.latest?.TIME_SERIES?latest:(row.latest||{});
           const pick=k=>update[k]?.value??update[k]?.[0]?.[1]??update[k];
           const posture=pick("posture"), duration=pick("duration"), alert=pick("alert"), confidence=pick("confidence");
-          if(posture!==undefined)this.onTelemetry?.({posture:String(posture),duration:Number(duration)||0,alert:String(alert)==="true"||alert===true,confidence:Number(confidence)||0.95,ts:Math.max(...Object.values(update).map(v=>Number(v?.ts)||0))||Date.now()});
+          if(posture!==undefined||duration!==undefined||alert!==undefined){
+            const maxTs=Math.max(0,...Object.values(update).map(v=>Number(v?.ts)||0));
+            this.onTelemetry?.({
+              posture:posture!==undefined?String(posture):AppState.live.currentPosture,
+              duration:Number(duration)||0,
+              alert:alert!==undefined?(String(alert)==="true"||alert===true):AppState.live.buzzerTriggered,
+              confidence:Number(confidence)||0.95,
+              ts:maxTs>0?maxTs:Date.now()
+            });
+          }
         });
       }catch(e){console.warn("Invalid TB WS message",e);}
     };
