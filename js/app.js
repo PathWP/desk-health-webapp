@@ -1,633 +1,206 @@
-/**
- * ============================================================================
- * js/app.js — ตัวควบคุมหลักของแอปพลิเคชัน (Main Controller & 1-Second Engine)
- * ============================================================================
- */
-
-document.addEventListener("DOMContentLoaded", () => {
-  // 1. โหลดการตั้งค่าและสร้างไอคอน Lucide
-  AppState.loadSettings();
-  lucide.createIcons();
-
-  // 2. ผูก Event Listeners ทั้งหมด
-  bindAuthEvents();
-  bindNavigationEvents();
-  bindDashboardControls();
-  bindAnalyticsControls();
-  bindSettingsForm();
-
-  // 3. เติมข้อมูลประวัติเหตุการณ์เริ่มต้นและเริ่มต้นกราฟ
-  seedInitialLogs();
-  AnalyticsCharts.init();
-  syncSettingsToUI();
-
-  // 4. เริ่ม Loop การทำงานทุก 1 วินาที (จำลอง Sampling Rate 1-2s และตัวจับเวลาสุขภาพ)
-  setInterval(runOneSecondTick, 1000);
+/* Main application controller */
+let engineTimer=null,authMode="login",autoSimTickCounter=0;
+document.addEventListener("DOMContentLoaded",()=>{
+  AppState.loadSettings();lucide.createIcons();
+  bindAuthEvents();bindNavigationEvents();bindDashboardControls();bindAnalyticsControls();bindSettingsForm();
+  AnalyticsCharts.init();syncSettingsToUI();
+  engineTimer=setInterval(runOneSecondTick,1000);
+  document.addEventListener("tb-connection",e=>{
+    const ok=e.detail.connected;
+    const el=document.getElementById("tb-status-text");if(el)el.textContent=ok?"ThingsBoard: Connected":"ThingsBoard: Disconnected";
+    const pill=document.getElementById("tb-status-pill");if(pill){pill.className=`flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-medium ${ok?"bg-emerald-50 text-emerald-700 border-emerald-200":"bg-rose-50 text-rose-700 border-rose-200"}`;}
+  });
 });
-
-/* --------------------------------------------------------------------------
- * A. AUTHENTICATION HANDLERS
- * -------------------------------------------------------------------------- */
-function bindAuthEvents() {
-  const tabLogin = document.getElementById("tab-login");
-  const tabRegister = document.getElementById("tab-register");
-  const nameGroup = document.getElementById("register-name-group");
-  const submitBtnText = document.querySelector("#auth-submit-btn span");
-  const authForm = document.getElementById("auth-form");
-  const demoBtn = document.getElementById("demo-login-btn");
-  const authError = document.getElementById("auth-error");
-
-  let authMode = "login";
-
-  tabLogin.addEventListener("click", () => {
-    authMode = "login";
-    tabLogin.className = "py-2 rounded-lg bg-white text-slate-900 shadow-sm transition";
-    tabRegister.className = "py-2 rounded-lg text-slate-500 hover:text-slate-800 transition";
-    nameGroup.classList.add("hidden");
-    submitBtnText.textContent = "เข้าสู่ระบบผ่าน ThingsBoard API";
-    authError.classList.add("hidden");
-  });
-
-  tabRegister.addEventListener("click", () => {
-    authMode = "register";
-    tabRegister.className = "py-2 rounded-lg bg-white text-slate-900 shadow-sm transition";
-    tabLogin.className = "py-2 rounded-lg text-slate-500 hover:text-slate-800 transition";
-    nameGroup.classList.remove("hidden");
-    submitBtnText.textContent = "ลงทะเบียนผู้ใช้งานใหม่";
-    authError.classList.add("hidden");
-  });
-
-  authForm.addEventListener("submit", async (e) => {
-    e.preventDefault();
-    authError.classList.add("hidden");
-
-    const email = document.getElementById("auth-email").value.trim();
-    const password = document.getElementById("auth-password").value;
-    const tbUrl = document.getElementById("auth-tb-url").value.trim();
-    const fullName = document.getElementById("auth-fullname").value.trim();
-
-    if (authMode === "register") {
-      enterApplication({
-        name: fullName || email.split("@")[0],
-        email,
-        isDemo: true,
-      });
-      AlertService.showToast({
-        title: "ลงทะเบียนสำเร็จ (Demo Sandbox)",
-        message: "สร้างบัญชีและเชื่อมต่อข้อมูลจำลอง ESP32-S3 เรียบร้อยแล้ว",
-        variant: "success",
-      });
-      return;
-    }
-
-    try {
-      await ThingsBoardAPI.login(email, password, tbUrl);
-      enterApplication({ name: email.split("@")[0], email, isDemo: false });
-      ThingsBoardAPI.connectTelemetryWebSocket((telemetry) => {
-        setPostureState(telemetry.posture, telemetry.confidence);
-      });
-    } catch (err) {
-      authError.textContent = `ไม่สามารถเชื่อมต่อ ThingsBoard Server (${err.message}) — กรุณากดปุ่ม "เข้าสู่ระบบด้วยโหมดจำลอง (Demo Mode)" ด้านล่างเพื่อทดสอบระบบ`;
-      authError.classList.remove("hidden");
-    }
-  });
-
-  demoBtn.addEventListener("click", () => {
-    enterApplication({
-      name: "Demo Ergonomics User",
-      email: "user@deskhealth.io",
-      isDemo: true,
-    });
-  });
-
-  // Logout Buttons
-  const handleLogout = () => {
-    ThingsBoardAPI.disconnect();
-    document.getElementById("app-shell").classList.add("hidden");
-    document.getElementById("auth-screen").classList.remove("hidden");
-  };
-  document.getElementById("logout-btn").addEventListener("click", handleLogout);
-  document.getElementById("mobile-logout-btn").addEventListener("click", handleLogout);
-}
-
-function enterApplication({ name, email, isDemo }) {
-  AppState.user = { name, email };
-  AppState.isDemoMode = isDemo;
-
-  document.getElementById("sidebar-user-name").textContent = name;
-  document.getElementById("sidebar-conn-mode").textContent = isDemo
-    ? "Demo Mode (ESP32-S3 Sim)"
-    : "ThingsBoard Live WSS";
-
-  document.getElementById("tb-status-text").textContent = isDemo
-    ? "ESP32-S3 Simulator Active"
-    : "Connected: ThingsBoard Live";
-
-  document.getElementById("auth-screen").classList.add("hidden");
-  document.getElementById("app-shell").classList.remove("hidden");
-  updateDashboardUI();
-}
-
-/* --------------------------------------------------------------------------
- * B. NAVIGATION & VIEW SWITCHING
- * -------------------------------------------------------------------------- */
-function bindNavigationEvents() {
-  const navBtns = document.querySelectorAll(".nav-btn");
-  const views = {
-    dashboard: document.getElementById("view-dashboard"),
-    analytics: document.getElementById("view-analytics"),
-    settings: document.getElementById("view-settings"),
-  };
-
-  const titles = {
-    dashboard: [
-      "Real-time Posture Dashboard",
-      "ติดตามท่านั่งทำงานและการแจ้งเตือนสุขภาพแบบเรียลไทม์ (Sampling 1-2s)",
-    ],
-    analytics: [
-      "Posture Analytics & Reports",
-      "วิเคราะห์สถิติสัดส่วนท่านั่งถูกสุขลักษณะและความถี่การแจ้งเตือน Buzzer",
-    ],
-    settings: [
-      "System & ThingsBoard Settings",
-      "กำหนดเวลาเตือนสุขภาพและการเชื่อมต่อ ThingsBoard IoT Platform",
-    ],
-  };
-
-  navBtns.forEach((btn) => {
-    btn.addEventListener("click", () => {
-      const target = btn.dataset.nav;
-      navBtns.forEach((b) => b.classList.remove("active"));
-      btn.classList.add("active");
-
-      Object.keys(views).forEach((key) => {
-        views[key].classList.toggle("hidden", key !== target);
-      });
-
-      document.getElementById("page-title").textContent = titles[target][0];
-      document.getElementById("page-subtitle").textContent = titles[target][1];
-
-      if (target === "analytics") {
-        AnalyticsCharts.updatePeriod(AnalyticsCharts.currentPeriod);
+function bindAuthEvents(){
+  const login=document.getElementById("tab-login"),reg=document.getElementById("tab-register");
+  login.addEventListener("click",()=>setAuthMode("login"));reg.addEventListener("click",()=>setAuthMode("register"));
+  document.getElementById("auth-form").addEventListener("submit",async e=>{
+    e.preventDefault();const err=document.getElementById("auth-error");err.classList.add("hidden");
+    const email=document.getElementById("auth-email").value.trim(),password=document.getElementById("auth-password").value;
+    const url=document.getElementById("auth-tb-url").value.trim();
+    const btn=document.getElementById("auth-submit-btn");btn.disabled=true;
+    try{
+      if(authMode==="register"){await ThingsBoardAPI.register();return;}
+      await ThingsBoardAPI.login(email,password,url);
+      enterApplication({name:AppState.user.name,email,isDemo:false});
+      if(!AppState.settings.tbDeviceId)AlertService.showToast({title:"Login สำเร็จ",message:"ไปที่ Settings แล้วกรอก Device Entity UUID เพื่อเริ่มรับ telemetry",variant:"warning"});
+      else{
+        ThingsBoardAPI.connectTelemetryWebSocket(handleTelemetry);
+        await ThingsBoardAPI.getLatest().then(d=>handleLatest(d)).catch(e=>console.warn("Initial latest telemetry:",e));
+        AnalyticsCharts.load();
       }
-    });
+    }catch(ex){err.textContent=ex.message;err.classList.remove("hidden");}
+    finally{btn.disabled=false;}
   });
+  document.getElementById("demo-login-btn").addEventListener("click",()=>{
+    AppState.isDemoMode=true;AppState.jwtToken=null;AppState.live.autoSimulate=true;
+    enterApplication({name:"Demo Ergonomics User",email:"demo@deskhealth.local",isDemo:true});
+  });
+  const logout=()=>{ThingsBoardAPI.disconnect();AppState.jwtToken=null;AppState.refreshToken=null;AppState.user=null;document.getElementById("app-shell").classList.add("hidden");document.getElementById("auth-screen").classList.remove("hidden");};
+  document.getElementById("logout-btn").addEventListener("click",logout);document.getElementById("mobile-logout-btn").addEventListener("click",logout);
 }
-
-/* --------------------------------------------------------------------------
- * C. DASHBOARD CONTROLS & EDGE AI SIMULATOR
- * -------------------------------------------------------------------------- */
-function bindDashboardControls() {
-  // ปุ่มเลือกสถานะจำลอง 4 คลาส
-  document.querySelectorAll(".sim-btn").forEach((btn) => {
-    btn.addEventListener("click", () => {
-      // ปิดการสุ่มอัตโนมัติเมื่อผู้ใช้กดเลือกเองเพื่อทดสอบ
-      const autoToggle = document.getElementById("auto-sim-toggle");
-      autoToggle.checked = false;
-      AppState.live.autoSimulate = false;
-
-      const selectedPosture = btn.dataset.simPosture;
-      const randomConf = +(0.91 + Math.random() * 0.08).toFixed(2);
-      setPostureState(selectedPosture, randomConf);
-    });
-  });
-
-  // สวิตช์สุ่มสถานะอัตโนมัติ
-  document.getElementById("auto-sim-toggle").addEventListener("change", (e) => {
-    AppState.live.autoSimulate = e.target.checked;
-  });
-
-  // ปุ่มเปิด/ปิดเสียงเตือน Buzzer
-  document.getElementById("quick-sound-btn").addEventListener("click", () => {
-    AppState.settings.soundEnabled = !AppState.settings.soundEnabled;
-    AppState.saveSettings();
-    updateSoundButtonUI();
-  });
-
-  // ปิด Urgent Banner
-  document.getElementById("dismiss-banner-btn").addEventListener("click", () => {
-    AlertService.hideUrgentBanner();
-  });
-
-  // ปุ่มทดสอบเร่งเวลานั่งต่อเนื่อง +10 นาที
-  document.getElementById("fast-forward-sitting-btn").addEventListener("click", () => {
-    AppState.live.continuousSittingSec += 600;
-    checkSedentaryThreshold();
-    updateDashboardUI();
-  });
-
-  // ปุ่มลุกยืดเส้นแล้ว (รีเซ็ตเวลานั่งต่อเนื่อง)
-  document.getElementById("reset-stretch-btn").addEventListener("click", () => {
-    AppState.live.continuousSittingSec = 0;
-    AppState.live.sedentaryAlertShown = false;
-    AlertService.hideUrgentBanner();
-    addEventLog("Sedentary Reset", "ผู้ใช้งานลุกยืดเส้นยืดสาย", "รีเซ็ตตัวนับ 45 นาที");
-    AlertService.showToast({
-      title: "เยี่ยมมาก! รีเซ็ตเวลานั่งต่อเนื่องแล้ว",
-      message: "เริ่มต้นนับรอบการทำงานใหม่ 45 นาที",
-      variant: "success",
-    });
-    updateDashboardUI();
-  });
-
-  // สวิตช์ Hydration บน Dashboard
-  document.getElementById("dash-hydration-toggle").addEventListener("change", (e) => {
-    AppState.settings.hydrationEnabled = e.target.checked;
-    document.getElementById("set-hydration-enabled").checked = e.target.checked;
-    AppState.saveSettings();
-    updateDashboardUI();
-  });
-
-  // ปุ่มทดสอบเตือนดื่มน้ำทันที
-  document.getElementById("test-hydration-btn").addEventListener("click", () => {
-    triggerHydrationAlert();
-  });
-
-  // ปุ่มดื่มน้ำแล้ว (+1 แก้ว และรีเซ็ตตัวนับ)
-  document.getElementById("drink-water-btn").addEventListener("click", () => {
-    AppState.live.waterGlasses += 1;
-    AppState.live.hydrationRemainingSec = AppState.settings.hydrationMinutes * 60;
-    addEventLog("Hydration", `ดื่มน้ำแก้วที่ ${AppState.live.waterGlasses}`, "รีเซ็ตตัวนับดื่มน้ำ");
-    AlertService.showToast({
-      title: `บันทึกการดื่มน้ำแก้วที่ ${AppState.live.waterGlasses} แล้ว`,
-      message: `ระบบจะเตือนอีกครั้งในอีก ${AppState.settings.hydrationMinutes} นาที`,
-      variant: "water",
-    });
-    updateDashboardUI();
-  });
-
-  // ปุ่มล้างตารางประวัติ
-  document.getElementById("clear-logs-btn").addEventListener("click", () => {
-    document.getElementById("event-log-tbody").innerHTML = "";
-  });
+function setAuthMode(mode){
+  authMode=mode;const l=document.getElementById("tab-login"),r=document.getElementById("tab-register"),name=document.getElementById("register-name-group"),txt=document.querySelector("#auth-submit-btn span"),err=document.getElementById("auth-error");
+  l.className=mode==="login"?"py-2 rounded-lg bg-white text-slate-900 shadow-sm transition":"py-2 rounded-lg text-slate-500 hover:text-slate-800 transition";
+  r.className=mode==="register"?"py-2 rounded-lg bg-white text-slate-900 shadow-sm transition":"py-2 rounded-lg text-slate-500 hover:text-slate-800 transition";
+  name.classList.toggle("hidden",mode!=="register");txt.textContent=mode==="login"?"เข้าสู่ระบบผ่าน ThingsBoard API":"ลงทะเบียนบัญชี";
+  err.textContent=mode==="register"?"การสมัครบัญชีต้องเปิด Self-Registration ใน ThingsBoard PE หรือสร้างผู้ใช้ผ่าน Tenant Admin ก่อน":"";
+  err.classList.toggle("hidden",mode!=="register");
 }
-
-function setPostureState(postureKey, confidence = 0.95) {
-  AppState.live.currentPosture = postureKey;
-  AppState.live.confidence = confidence;
-
-  // ไฮไลต์ปุ่ม Simulator ที่เลือกอยู่
-  document.querySelectorAll(".sim-btn").forEach((btn) => {
-    btn.classList.toggle("ring-2", btn.dataset.simPosture === postureKey);
-    btn.classList.toggle("ring-white", btn.dataset.simPosture === postureKey);
-  });
-
+function enterApplication({name,email,isDemo}){
+  AppState.user={name,email};AppState.isDemoMode=isDemo;
+  document.getElementById("sidebar-user-name").textContent=name;
+  document.getElementById("sidebar-conn-mode").textContent=isDemo?"Demo Simulator":"ThingsBoard Live WebSocket";
+  document.getElementById("tb-status-text").textContent=isDemo?"Demo Simulator Active":"Connecting ThingsBoard…";
+  document.getElementById("auth-screen").classList.add("hidden");document.getElementById("app-shell").classList.remove("hidden");
+  AppState.live.autoSimulate=!!isDemo;document.getElementById("auto-sim-toggle").checked=!!isDemo;updateDashboardUI();
+}
+function bindNavigationEvents(){
+  const views={dashboard:"view-dashboard",analytics:"view-analytics",settings:"view-settings"};
+  const titles={dashboard:["Real-time Posture Dashboard","ติดตามท่านั่งและการแจ้งเตือนสุขภาพ"],analytics:["Posture Analytics & Reports","วิเคราะห์สถิติจาก ThingsBoard telemetry"],settings:["System & ThingsBoard Settings","ตั้งค่าเกณฑ์สุขภาพและการเชื่อมต่อ IoT"]};
+  document.querySelectorAll(".nav-btn").forEach(btn=>btn.addEventListener("click",()=>{
+    const key=btn.dataset.nav;if(!views[key])return;
+    document.querySelectorAll(".nav-btn").forEach(b=>b.classList.toggle("active",b===btn));
+    Object.entries(views).forEach(([k,id])=>document.getElementById(id).classList.toggle("hidden",k!==key));
+    document.getElementById("page-title").textContent=titles[key][0];document.getElementById("page-subtitle").textContent=titles[key][1];
+    if(key==="analytics")AnalyticsCharts.load();
+  }));
+}
+function bindDashboardControls(){
+  document.querySelectorAll(".sim-btn").forEach(btn=>btn.addEventListener("click",()=>{
+    AppState.live.autoSimulate=false;document.getElementById("auto-sim-toggle").checked=false;
+    setPostureState(btn.dataset.simPosture,0.97);
+  }));
+  document.getElementById("auto-sim-toggle").addEventListener("change",e=>{AppState.live.autoSimulate=e.target.checked;});
+  document.getElementById("quick-sound-btn").addEventListener("click",()=>{AppState.settings.soundEnabled=!AppState.settings.soundEnabled;AppState.saveSettings();updateSoundButtonUI();});
+  document.getElementById("dismiss-banner-btn").addEventListener("click",()=>AlertService.hideUrgentBanner());
+  document.getElementById("fast-forward-sitting-btn").addEventListener("click",()=>{AppState.live.continuousSittingSec+=600;checkSedentaryThreshold();updateDashboardUI();});
+  document.getElementById("reset-stretch-btn").addEventListener("click",()=>{AppState.live.continuousSittingSec=0;AppState.live.sedentaryAlertShown=false;AlertService.hideUrgentBanner();addEventLog("Sedentary Reset","ผู้ใช้งานลุกยืดเส้นยืดสาย","รีเซ็ตตัวนับ");updateDashboardUI();});
+  document.getElementById("dash-hydration-toggle").addEventListener("change",e=>setHydrationEnabled(e.target.checked));
+  document.getElementById("test-hydration-btn").addEventListener("click",triggerHydrationAlert);
+  document.getElementById("drink-water-btn").addEventListener("click",()=>{AppState.live.waterGlasses++;AppState.live.hydrationRemainingSec=AppState.settings.hydrationMinutes*60;addEventLog("Hydration",`ดื่มน้ำแก้วที่ ${AppState.live.waterGlasses}`,"รีเซ็ตตัวนับ");AlertService.showToast({title:"บันทึกการดื่มน้ำแล้ว",message:`แก้วที่ ${AppState.live.waterGlasses}`,variant:"water"});updateDashboardUI();});
+  document.getElementById("clear-logs-btn").addEventListener("click",()=>{document.getElementById("event-log-tbody").replaceChildren();AppState.logs=[];});
+}
+function setHydrationEnabled(enabled){
+  AppState.settings.hydrationEnabled=enabled;
+  if(enabled&&AppState.live.hydrationRemainingSec<=0)AppState.live.hydrationRemainingSec=AppState.settings.hydrationMinutes*60;
+  document.getElementById("set-hydration-enabled").checked=enabled;AppState.saveSettings();updateDashboardUI();
+}
+function setPostureState(key,confidence=0.95,source={}){
+  if(!APP_CONFIG.POSTURE_META[key]){console.warn("Unknown posture:",key);return;}
+  const live=AppState.live;live.currentPosture=key;live.confidence=confidence;
+  document.querySelectorAll(".sim-btn").forEach(b=>{b.classList.toggle("ring-2",b.dataset.simPosture===key);b.classList.toggle("ring-white",b.dataset.simPosture===key);});
+  if(source.alert===true)handleDeviceAlert(source);
   updateDashboardUI();
 }
-
-/* --------------------------------------------------------------------------
- * D. MAIN 1-SECOND ENGINE (Debounce 5s, Sedentary 45m, Hydration 60m)
- * -------------------------------------------------------------------------- */
-let autoSimTickCounter = 0;
-
-function runOneSecondTick() {
-  // ทำงานเฉพาะเมื่อเข้าสู่ระบบแล้ว
-  if (document.getElementById("app-shell").classList.contains("hidden")) return;
-
-  const live = AppState.live;
-  const settings = AppState.settings;
-
-  // 1. สุ่มสถานะจำลองอัตโนมัติทุกๆ 8 วินาที (หากเปิด Auto Simulate)
-  if (live.autoSimulate) {
-    autoSimTickCounter++;
-    if (autoSimTickCounter >= 8) {
-      autoSimTickCounter = 0;
-      const pool = ["Good_Posture", "Good_Posture", "Good_Posture", "Slouching", "Glute_Sliding"];
-      const next = pool[Math.floor(Math.random() * pool.length)];
-      setPostureState(next, +(0.9 + Math.random() * 0.09).toFixed(2));
-    }
+function handleLatest(data){
+  const get=k=>data?.[k]?.[0]?.value;
+  const p=get("posture");if(p!==undefined)setPostureState(String(p),Number(get("confidence"))||.95,{alert:String(get("alert"))==="true",duration:Number(get("duration"))||0,ts:Number(data.posture?.[0]?.ts)||Date.now()});
+}
+function handleTelemetry(t){
+  if(t.ts&&t.ts<=AppState.live.lastTelemetryTs)return;
+  AppState.live.lastTelemetryTs=t.ts||Date.now();AppState.live.mqttPackets++;
+  setPostureState(t.posture,t.confidence,{...t});
+  if(t.alert===false && AppState.live.buzzerTriggered){AppState.live.buzzerTriggered=false;AlertService.hideUrgentBanner();}
+}
+function handleDeviceAlert(t){
+  const live=AppState.live;
+  if(!live.buzzerTriggered){
+    live.buzzerTriggered=true;live.dailyBuzzerCount++;
+    const meta=APP_CONFIG.POSTURE_META[live.currentPosture];
+    AlertService.playBuzzerTone("posture");
+    AlertService.showUrgentBanner({title:`แจ้งเตือนท่านั่งผิด (${meta.labelTh})`,desc:"ESP32-S3 ส่ง alert=true จาก Edge AI",level:"danger"});
+    AlertService.showToast({title:"Posture Alert",message:`ตรวจพบ ${meta.labelTh}`,variant:"danger"});
+    addEventLog("Bad Posture Alert",meta.labelTh,"รับ alert=true จาก ThingsBoard");
   }
-
-  const meta = APP_CONFIG.POSTURE_META[live.currentPosture];
-
-  // 2. ตรรกะ Debounce 5 วินาทีสำหรับท่านั่งผิด (Slouching / Glute_Sliding)
-  if (meta.isBad) {
-    live.badPostureStreakSec += 1;
-    live.dailyBadSec += 1;
-
-    if (live.badPostureStreakSec >= settings.debounceSeconds && !live.buzzerTriggered) {
-      live.buzzerTriggered = true;
-      live.dailyBuzzerCount += 1;
-
-      // สั่งงานเสียง Buzzer + แจ้งเตือนบน Web App
-      AlertService.playBuzzerTone("posture");
-      AlertService.showUrgentBanner({
-        title: `แจ้งเตือนนั่งผิดท่า (${meta.labelTh}) เกิน ${settings.debounceSeconds} วินาที!`,
-        desc: meta.advice,
-        level: "danger",
-      });
-      AlertService.showToast({
-        title: `Buzzer Alert: ${live.currentPosture}`,
-        message: `ตรวจพบ "${meta.labelTh}" ติดต่อกันครบ ${settings.debounceSeconds} วินาที`,
-        variant: "danger",
-      });
-      addEventLog(
-        "Bad Posture Alert",
-        `${meta.labelTh} (${live.currentPosture})`,
-        "Active Buzzer ดัง + ส่ง MQTT Alert"
-      );
-    }
-  } else {
-    // รีเซ็ต Debounce ทันทีเมื่อกลับมานั่งตรงหรือลุกออกจากโต๊ะ
-    if (live.buzzerTriggered) {
-      AlertService.hideUrgentBanner();
-    }
-    live.badPostureStreakSec = 0;
-    live.buzzerTriggered = false;
-
-    if (live.currentPosture === "Good_Posture") {
-      live.dailyGoodSec += 1;
-    }
-  }
-
-  // 3. นับเวลานั่งต่อเนื่อง (นับเฉพาะสถานะที่ไม่ใช่ No_User)
-  if (meta.isSitting) {
-    live.continuousSittingSec += 1;
+}
+function runOneSecondTick(){
+  const shell=document.getElementById("app-shell");if(!shell||shell.classList.contains("hidden"))return;
+  const live=AppState.live,s=AppState.settings,now=new Date();
+  if(live.lastDailyDate!==now.toDateString()){live.dailyGoodSec=0;live.dailyBadSec=0;live.dailyBuzzerCount=0;live.waterGlasses=0;live.lastDailyDate=now.toDateString();}
+  if(AppState.isDemoMode&&live.autoSimulate){autoSimTickCounter++;if(autoSimTickCounter>=8){autoSimTickCounter=0;const pool=["Good_Posture","Good_Posture","Slouching","Glute_Sliding","No_User"];setPostureState(pool[Math.floor(Math.random()*pool.length)],.93);}}
+  const meta=APP_CONFIG.POSTURE_META[live.currentPosture];
+  if(meta.isSitting){
+    live.continuousSittingSec++;
+    if(meta.isBad){live.dailyBadSec++;if(!AppState.isDemoMode&&!live.buzzerTriggered&&live.badPostureStreakSec>=s.debounceSeconds){/* alert flag is authoritative in live mode */}}
+    else live.dailyGoodSec++;
     checkSedentaryThreshold();
+  } // No_User: pause the continuous-sitting counter; do not add elapsed time.
+  if(meta.isBad){live.badPostureStreakSec++;if(AppState.isDemoMode&&live.badPostureStreakSec>=s.debounceSeconds&&!live.buzzerTriggered)handleDeviceAlert({alert:true});}
+  else{live.badPostureStreakSec=0;if(live.buzzerTriggered){live.buzzerTriggered=false;AlertService.hideUrgentBanner();}}
+  if(s.hydrationEnabled){
+    live.hydrationRemainingSec=Math.max(0,live.hydrationRemainingSec-1);
+    if(live.hydrationRemainingSec===0){triggerHydrationAlert();live.hydrationRemainingSec=s.hydrationMinutes*60;}
   }
-
-  // 4. นับถอยหลังเตือนดื่มน้ำ (Hydration Reminder)
-  if (settings.hydrationEnabled && live.hydrationRemainingSec > 0) {
-    live.hydrationRemainingSec -= 1;
-    if (live.hydrationRemainingSec === 0) {
-      triggerHydrationAlert();
-      live.hydrationRemainingSec = settings.hydrationMinutes * 60;
-    }
-  }
-
-  // 5. อัปเดตหน้าจอ Dashboard และ MQTT JSON Payload Preview
-  live.mqttPackets += 1;
   updateDashboardUI();
 }
-
-function checkSedentaryThreshold() {
-  const limitSec = AppState.settings.sedentaryMinutes * 60;
-  if (AppState.live.continuousSittingSec >= limitSec && !AppState.live.sedentaryAlertShown) {
-    AppState.live.sedentaryAlertShown = true;
-    AlertService.playBuzzerTone("health");
-    AlertService.showUrgentBanner({
-      title: `เตือนนั่งทำงานต่อเนื่องครบ ${AppState.settings.sedentaryMinutes} นาทีแล้ว!`,
-      desc: "กรุณาลุกขึ้นยืน ยืดเส้นยืดสาย หรือเดินพักสายตา 2-3 นาที",
-      level: "warning",
-    });
-    AlertService.showToast({
-      title: "Sedentary Alert (นั่งนานเกินไป)",
-      message: `คุณนั่งทำงานต่อเนื่องครบ ${AppState.settings.sedentaryMinutes} นาทีแล้ว ลุกยืดเส้นกันเถอะ`,
-      variant: "warning",
-      duration: 8000,
-    });
-    addEventLog(
-      "Sedentary Alert",
-      `นั่งต่อเนื่องครบ ${AppState.settings.sedentaryMinutes} นาที`,
-      "แจ้งเตือนให้ลุกยืดเส้นยืดสาย"
-    );
+function checkSedentaryThreshold(){
+  const live=AppState.live,limit=AppState.settings.sedentaryMinutes*60;
+  if(live.continuousSittingSec>=limit&&!live.sedentaryAlertShown){
+    live.sedentaryAlertShown=true;AlertService.playBuzzerTone("health");
+    AlertService.showUrgentBanner({title:`นั่งต่อเนื่องครบ ${AppState.settings.sedentaryMinutes} นาทีแล้ว`,desc:"กรุณาลุกยืน ยืดเส้น หรือเดินพัก 2–3 นาที",level:"warning"});
+    AlertService.showToast({title:"Sedentary Alert",message:"ถึงเวลาลุกเปลี่ยนอิริยาบถแล้ว",variant:"warning",duration:8000});
+    addEventLog("Sedentary Alert",`ครบ ${AppState.settings.sedentaryMinutes} นาที`,"แจ้งเตือนให้ลุกพัก");
   }
 }
-
-function triggerHydrationAlert() {
-  AlertService.playBuzzerTone("health");
-  AlertService.showToast({
-    title: "ถึงเวลาดื่มน้ำแล้ว (Hydration Reminder)",
-    message: "จิบน้ำสะอาด 1 แก้ว เพื่อเพิ่มความสดชื่นและลดอาการอ่อนล้า",
-    variant: "water",
-    duration: 7000,
+function triggerHydrationAlert(){
+  AlertService.playBuzzerTone("health");AlertService.showToast({title:"ถึงเวลาดื่มน้ำแล้ว",message:"จิบน้ำสะอาดสักแก้ว",variant:"water",duration:7000});
+  addEventLog("Hydration Reminder","ครบกำหนดเวลาเตือนดื่มน้ำ","แจ้งเตือนบน Web App");
+}
+function updateDashboardUI(){
+  const live=AppState.live,s=AppState.settings,meta=APP_CONFIG.POSTURE_META[live.currentPosture];if(!meta)return;
+  const themes={emerald:["border-emerald-200","bg-emerald-100 text-emerald-600","bg-emerald-100 text-emerald-800","bg-emerald-500"],amber:["border-amber-300","bg-amber-100 text-amber-600","bg-amber-100 text-amber-800","bg-amber-500"],rose:["border-rose-300","bg-rose-100 text-rose-600","bg-rose-100 text-rose-800","bg-rose-500"],slate:["border-slate-200","bg-slate-100 text-slate-500","bg-slate-200 text-slate-700","bg-slate-400"]};
+  const t=themes[meta.colorTheme],hero=document.getElementById("posture-hero-card"),lamp=document.getElementById("posture-lamp"),badge=document.getElementById("posture-class-badge");
+  hero.className=`xl:col-span-7 bg-white rounded-3xl p-6 lg:p-7 border-2 ${t[0]} shadow-sm transition-all duration-300 flex flex-col justify-between ${live.buzzerTriggered?"posture-alert-pulse":""}`;
+  lamp.className=`w-20 h-20 rounded-3xl ${t[1]} flex items-center justify-center shrink-0 shadow-inner`;badge.className=`px-2.5 py-0.5 rounded-md font-mono text-xs font-semibold ${t[2]}`;
+  document.getElementById("posture-label-th").textContent=meta.labelTh;badge.textContent=live.currentPosture;document.getElementById("posture-advice").textContent=meta.advice;document.getElementById("posture-confidence").textContent=`Confidence: ${(live.confidence*100).toFixed(1)}%`;
+  lamp.innerHTML=`<i data-lucide="${meta.icon}" class="w-10 h-10"></i>`;lucide.createIcons({nodes:[lamp]});
+  const debounce=Math.min(live.badPostureStreakSec,s.debounceSeconds),bar=document.getElementById("debounce-progress-bar");bar.style.width=`${debounce/s.debounceSeconds*100}%`;bar.className=`h-full ${t[3]} rounded-full transition-all`;
+  document.getElementById("debounce-max-label").textContent=s.debounceSeconds;
+  document.getElementById("debounce-counter-text").textContent=meta.isBad?`${live.badPostureStreakSec}s / ${s.debounceSeconds}s ${live.buzzerTriggered?"(ALERT)":"(กำลังตรวจสอบ…)"}`:`0s / ${s.debounceSeconds}s (ปกติ)`;
+  const hw=document.getElementById("buzzer-hardware-state");hw.textContent=live.buzzerTriggered?"BUZZER: ACTIVE":"BUZZER: OFF";hw.className=live.buzzerTriggered?"font-mono font-bold text-rose-600":"font-mono text-slate-500";
+  document.getElementById("mqtt-packet-count").textContent=`Packets: ${live.mqttPackets}`;
+  document.getElementById("mqtt-payload-preview").textContent=JSON.stringify({posture:live.currentPosture,duration:meta.isBad?live.badPostureStreakSec:live.continuousSittingSec,alert:live.buzzerTriggered},null,2);
+  document.getElementById("continuous-time-display").textContent=formatMMSS(live.continuousSittingSec);document.getElementById("sedentary-target-label").textContent=s.sedentaryMinutes;
+  document.getElementById("sedentary-progress-bar").style.width=`${Math.min(100,live.continuousSittingSec/(s.sedentaryMinutes*60)*100)}%`;
+  const total=live.dailyGoodSec+live.dailyBadSec,goodPct=total?Math.round(live.dailyGoodSec/total*100):0;
+  document.getElementById("daily-total-display").textContent=`${Math.floor(total/3600)} ชม. ${Math.floor(total%3600/60)} น.`;
+  document.getElementById("daily-good-pct").textContent=`${goodPct}%`;document.getElementById("daily-buzzer-count").textContent=live.dailyBuzzerCount;document.getElementById("daily-good-bar").style.width=`${goodPct}%`;
+  document.getElementById("dash-hydration-toggle").checked=s.hydrationEnabled;document.getElementById("hydration-countdown-display").textContent=s.hydrationEnabled?formatMMSS(live.hydrationRemainingSec):"ปิดใช้งาน";
+  document.getElementById("hydration-status-label").textContent=s.hydrationEnabled?`ถัดไป (ทุก ${s.hydrationMinutes} น.)`:"เปิดสวิตช์เพื่อเริ่มนับเวลา";document.getElementById("water-glasses-count").textContent=live.waterGlasses;
+}
+function updateSoundButtonUI(){
+  const enabled=AppState.settings.soundEnabled;document.getElementById("quick-sound-label").textContent=enabled?"เสียงเตือน: เปิด":"เสียงเตือน: ปิด";
+  document.getElementById("quick-sound-icon").setAttribute("data-lucide",enabled?"volume-2":"volume-x");lucide.createIcons({nodes:[document.getElementById("quick-sound-btn")]});
+}
+function bindAnalyticsControls(){
+  const d=document.getElementById("analytics-daily-btn"),w=document.getElementById("analytics-weekly-btn");
+  d.addEventListener("click",()=>{d.className="px-4 py-2 rounded-lg bg-white text-slate-900 shadow-sm";w.className="px-4 py-2 rounded-lg text-slate-500";AnalyticsCharts.updatePeriod("daily");});
+  w.addEventListener("click",()=>{w.className="px-4 py-2 rounded-lg bg-white text-slate-900 shadow-sm";d.className="px-4 py-2 rounded-lg text-slate-500";AnalyticsCharts.updatePeriod("weekly");});
+}
+function bindSettingsForm(){
+  document.getElementById("settings-form").addEventListener("submit",async e=>{
+    e.preventDefault();const s=AppState.settings;
+    s.sedentaryMinutes=clampNum("set-sedentary-mins",5,180,45);s.debounceSeconds=clampNum("set-debounce-secs",2,30,5);s.hydrationMinutes=clampNum("set-hydration-mins",10,240,60);
+    s.hydrationEnabled=document.getElementById("set-hydration-enabled").checked;s.tbUrl=document.getElementById("set-tb-url").value.trim().replace(/\/+$/,"");s.tbDeviceId=document.getElementById("set-tb-device-id").value.trim();
+    AppState.live.hydrationRemainingSec=s.hydrationMinutes*60;AppState.live.sedentaryAlertShown=false;AppState.saveSettings();syncSettingsToUI();updateDashboardUI();
+    if(!AppState.isDemoMode&&AppState.jwtToken){ThingsBoardAPI.disconnect();if(s.tbDeviceId){ThingsBoardAPI.connectTelemetryWebSocket(handleTelemetry);AnalyticsCharts.load();}}
+    AlertService.showToast({title:"บันทึกการตั้งค่าแล้ว",message:"อัปเดตเกณฑ์และการเชื่อมต่อเรียบร้อย",variant:"success"});
   });
-  addEventLog("Hydration Reminder", "ครบกำหนดเวลาเตือนดื่มน้ำ", "แจ้งเตือนบน Web App");
-}
-
-/* --------------------------------------------------------------------------
- * E. UPDATE DASHBOARD UI
- * -------------------------------------------------------------------------- */
-function updateDashboardUI() {
-  const live = AppState.live;
-  const settings = AppState.settings;
-  const meta = APP_CONFIG.POSTURE_META[live.currentPosture];
-
-  // Hero Card & Colors
-  const heroCard = document.getElementById("posture-hero-card");
-  const lamp = document.getElementById("posture-lamp");
-  const badge = document.getElementById("posture-class-badge");
-
-  const themeMap = {
-    emerald: {
-      border: "border-emerald-200",
-      lamp: "bg-emerald-100 text-emerald-600",
-      badge: "bg-emerald-100 text-emerald-800",
-      bar: "bg-emerald-500",
-    },
-    amber: {
-      border: "border-amber-300",
-      lamp: "bg-amber-100 text-amber-600",
-      badge: "bg-amber-100 text-amber-800",
-      bar: "bg-amber-500",
-    },
-    rose: {
-      border: "border-rose-300",
-      lamp: "bg-rose-100 text-rose-600",
-      badge: "bg-rose-100 text-rose-800",
-      bar: "bg-rose-500",
-    },
-    slate: {
-      border: "border-slate-200",
-      lamp: "bg-slate-100 text-slate-500",
-      badge: "bg-slate-200 text-slate-700",
-      bar: "bg-slate-400",
-    },
-  };
-
-  const t = themeMap[meta.colorTheme];
-  heroCard.className = `xl:col-span-7 bg-white rounded-3xl p-6 lg:p-7 border-2 ${t.border} shadow-sm transition-all duration-300 flex flex-col justify-between ${
-    live.buzzerTriggered ? "posture-alert-pulse" : ""
-  }`;
-  lamp.className = `w-20 h-20 rounded-3xl ${t.lamp} flex items-center justify-center shrink-0 shadow-inner transition-colors`;
-  badge.className = `px-2.5 py-0.5 rounded-md font-mono text-xs font-semibold ${t.badge}`;
-
-  document.getElementById("posture-label-th").textContent = meta.labelTh;
-  badge.textContent = live.currentPosture;
-  document.getElementById("posture-advice").textContent = meta.advice;
-  document.getElementById("posture-confidence").textContent = `Confidence: ${(live.confidence * 100).toFixed(1)}%`;
-
-  // Update Hero Icon dynamically
-  lamp.innerHTML = `<i data-lucide="${meta.icon}" class="w-10 h-10"></i>`;
-  lucide.createIcons({ nodes: [lamp] });
-
-  // Debounce Progress Bar
-  const maxDebounce = settings.debounceSeconds;
-  const clampedStreak = Math.min(live.badPostureStreakSec, maxDebounce);
-  const debouncePct = (clampedStreak / maxDebounce) * 100;
-
-  document.getElementById("debounce-max-label").textContent = maxDebounce;
-  const barEl = document.getElementById("debounce-progress-bar");
-  barEl.style.width = `${debouncePct}%`;
-  barEl.className = `h-full ${t.bar} rounded-full transition-all duration-300`;
-
-  document.getElementById("debounce-counter-text").textContent = meta.isBad
-    ? `${live.badPostureStreakSec.toFixed(1)}s / ${maxDebounce}.0s ${live.buzzerTriggered ? "(BUZZER ON!)" : "(กำลังตรวจสอบ...)"}`
-    : `0.0s / ${maxDebounce}.0s (ปกติ)`;
-
-  const buzzerHwEl = document.getElementById("buzzer-hardware-state");
-  buzzerHwEl.textContent = live.buzzerTriggered ? "BUZZER: ACTIVE (BEEPING)" : "BUZZER: OFF";
-  buzzerHwEl.className = live.buzzerTriggered
-    ? "font-mono font-bold text-rose-600"
-    : "font-mono text-slate-500";
-
-  // MQTT Payload Preview
-  document.getElementById("mqtt-packet-count").textContent = `Packets: ${live.mqttPackets}`;
-  document.getElementById("mqtt-payload-preview").textContent = JSON.stringify(
-    {
-      posture: live.currentPosture,
-      confidence: live.confidence,
-      duration: meta.isBad ? live.badPostureStreakSec : live.continuousSittingSec,
-      alert: live.buzzerTriggered,
-    },
-    null,
-    2
-  );
-
-  // Timer 1: Continuous Sitting (Sedentary)
-  document.getElementById("continuous-time-display").textContent = formatMMSS(live.continuousSittingSec);
-  document.getElementById("sedentary-target-label").textContent = settings.sedentaryMinutes;
-  const sedentaryPct = Math.min(100, (live.continuousSittingSec / (settings.sedentaryMinutes * 60)) * 100);
-  document.getElementById("sedentary-progress-bar").style.width = `${sedentaryPct}%`;
-
-  // Timer 2: Cumulative Daily Sitting
-  const totalDailySec = live.dailyGoodSec + live.dailyBadSec;
-  const hrs = Math.floor(totalDailySec / 3600);
-  const mins = Math.floor((totalDailySec % 3600) / 60);
-  const goodPct = totalDailySec > 0 ? Math.round((live.dailyGoodSec / totalDailySec) * 100) : 100;
-
-  document.getElementById("daily-total-display").textContent = `${hrs} ชม. ${mins} น.`;
-  document.getElementById("daily-good-pct").textContent = `${goodPct}%`;
-  document.getElementById("daily-buzzer-count").textContent = live.dailyBuzzerCount;
-  document.getElementById("daily-good-bar").style.width = `${goodPct}%`;
-
-  // Timer 3: Hydration Countdown
-  const hydDisplay = document.getElementById("hydration-countdown-display");
-  const hydStatus = document.getElementById("hydration-status-label");
-  if (settings.hydrationEnabled) {
-    hydDisplay.textContent = formatMMSS(live.hydrationRemainingSec);
-    hydDisplay.className = "text-3xl font-bold font-mono text-sky-600";
-    hydStatus.textContent = `ถัดไป (ทุก ${settings.hydrationMinutes} น.)`;
-  } else {
-    hydDisplay.textContent = "ปิดใช้งาน";
-    hydDisplay.className = "text-2xl font-bold text-slate-400";
-    hydStatus.textContent = "เปิดสวิตช์เพื่อเริ่มนับเวลา";
-  }
-  document.getElementById("water-glasses-count").textContent = live.waterGlasses;
-}
-
-function updateSoundButtonUI() {
-  const enabled = AppState.settings.soundEnabled;
-  const iconEl = document.getElementById("quick-sound-icon");
-  const labelEl = document.getElementById("quick-sound-label");
-
-  labelEl.textContent = enabled ? "เสียงเตือน: เปิด" : "เสียงเตือน: ปิด";
-  iconEl.setAttribute("data-lucide", enabled ? "volume-2" : "volume-x");
-  lucide.createIcons({ nodes: [document.getElementById("quick-sound-btn")] });
-}
-
-/* --------------------------------------------------------------------------
- * F. ANALYTICS & SETTINGS HANDLERS
- * -------------------------------------------------------------------------- */
-function bindAnalyticsControls() {
-  const dailyBtn = document.getElementById("analytics-daily-btn");
-  const weeklyBtn = document.getElementById("analytics-weekly-btn");
-
-  dailyBtn.addEventListener("click", () => {
-    dailyBtn.className = "px-4 py-2 rounded-lg bg-white text-slate-900 shadow-sm transition";
-    weeklyBtn.className = "px-4 py-2 rounded-lg text-slate-500 hover:text-slate-900 transition";
-    AnalyticsCharts.updatePeriod("daily");
-  });
-
-  weeklyBtn.addEventListener("click", () => {
-    weeklyBtn.className = "px-4 py-2 rounded-lg bg-white text-slate-900 shadow-sm transition";
-    dailyBtn.className = "px-4 py-2 rounded-lg text-slate-500 hover:text-slate-900 transition";
-    AnalyticsCharts.updatePeriod("weekly");
+  document.getElementById("test-tb-conn-btn").addEventListener("click",async()=>{
+    try{await ThingsBoardAPI.testConnection();AlertService.showToast({title:"เชื่อมต่อสำเร็จ",message:"ยืนยัน JWT และอ่าน telemetry ของ Device ได้",variant:"success"});}
+    catch(e){AlertService.showToast({title:"ทดสอบไม่สำเร็จ",message:e.message,variant:"danger"});}
   });
 }
-
-function bindSettingsForm() {
-  const form = document.getElementById("settings-form");
-  const testConnBtn = document.getElementById("test-tb-conn-btn");
-
-  form.addEventListener("submit", (e) => {
-    e.preventDefault();
-
-    AppState.settings.sedentaryMinutes = Math.max(5, parseInt(document.getElementById("set-sedentary-mins").value, 10) || 45);
-    AppState.settings.debounceSeconds = Math.max(2, parseInt(document.getElementById("set-debounce-secs").value, 10) || 5);
-    AppState.settings.hydrationMinutes = Math.max(10, parseInt(document.getElementById("set-hydration-mins").value, 10) || 60);
-    AppState.settings.hydrationEnabled = document.getElementById("set-hydration-enabled").checked;
-    AppState.settings.tbUrl = document.getElementById("set-tb-url").value.trim() || "https://thingsboard.cloud";
-    AppState.settings.tbDeviceId = document.getElementById("set-tb-device-id").value.trim();
-
-    AppState.live.hydrationRemainingSec = AppState.settings.hydrationMinutes * 60;
-    AppState.saveSettings();
-    syncSettingsToUI();
-    updateDashboardUI();
-
-    AlertService.showToast({
-      title: "บันทึกการตั้งค่าเรียบร้อยแล้ว",
-      message: "อัปเดตเกณฑ์แจ้งเตือนสุขภาพและการเชื่อมต่อ ThingsBoard เรียบร้อย",
-      variant: "success",
-    });
-  });
-
-  testConnBtn.addEventListener("click", async () => {
-    const url = document.getElementById("set-tb-url").value.trim();
-    AlertService.showToast({
-      title: "กำลังตรวจสอบ ThingsBoard Endpoint...",
-      message: `Ping ไปยัง ${url}/api/v1/telemetry`,
-      variant: "info",
-      duration: 3000,
-    });
-  });
+function clampNum(id,min,max,fallback){const n=Number(document.getElementById(id).value);return Number.isFinite(n)?Math.min(max,Math.max(min,n)):fallback;}
+function syncSettingsToUI(){
+  const s=AppState.settings;document.getElementById("set-sedentary-mins").value=s.sedentaryMinutes;document.getElementById("set-debounce-secs").value=s.debounceSeconds;document.getElementById("set-hydration-mins").value=s.hydrationMinutes;
+  document.getElementById("set-hydration-enabled").checked=s.hydrationEnabled;document.getElementById("dash-hydration-toggle").checked=s.hydrationEnabled;document.getElementById("set-tb-url").value=s.tbUrl;document.getElementById("set-tb-device-id").value=s.tbDeviceId;updateSoundButtonUI();
 }
-
-function syncSettingsToUI() {
-  const s = AppState.settings;
-  document.getElementById("set-sedentary-mins").value = s.sedentaryMinutes;
-  document.getElementById("set-debounce-secs").value = s.debounceSeconds;
-  document.getElementById("set-hydration-mins").value = s.hydrationMinutes;
-  document.getElementById("set-hydration-enabled").checked = s.hydrationEnabled;
-  document.getElementById("dash-hydration-toggle").checked = s.hydrationEnabled;
-  document.getElementById("set-tb-url").value = s.tbUrl;
-  document.getElementById("set-tb-device-id").value = s.tbDeviceId;
-  updateSoundButtonUI();
-}
-
-/* --------------------------------------------------------------------------
- * G. HELPERS & EVENT LOG TABLE
- * -------------------------------------------------------------------------- */
-function formatMMSS(totalSec) {
-  const mins = Math.floor(totalSec / 60);
-  const secs = totalSec % 60;
-  return `${String(mins).padStart(2, "0")}:${String(secs).padStart(2, "0")}`;
-}
-
-function addEventLog(type, detail, action) {
-  const tbody = document.getElementById("event-log-tbody");
-  if (!tbody) return;
-
-  const nowStr = new Date().toLocaleTimeString("th-TH", {
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-  });
-
-  const tr = document.createElement("tr");
-  tr.className = "hover:bg-slate-50/80 transition";
-  tr.innerHTML = `
-    <td class="py-2.5 px-3 font-mono text-slate-500">${nowStr}</td>
-    <td class="py-2.5 px-3 font-semibold text-slate-800">${type}</td>
-    <td class="py-2.5 px-3 text-slate-600">${detail}</td>
-    <td class="py-2.5 px-3 text-right">
-      <span class="inline-block px-2 py-0.5 rounded-md bg-slate-100 text-slate-700 font-medium">${action}</span>
-    </td>
-  `;
-  tbody.prepend(tr);
-}
-
-function seedInitialLogs() {
-  addEventLog("System Ready", "เชื่อมต่อ ESP32-S3 Edge Impulse สำเร็จ", "เริ่มตรวจจับท่านั่ง (1-2s)");
-  addEventLog("Bad Posture Alert", "หลังค่อม / ก้มคอ (Slouching)", "Active Buzzer ดัง + ส่ง MQTT Alert");
+function formatMMSS(sec){sec=Math.max(0,Math.floor(sec));return `${String(Math.floor(sec/60)).padStart(2,"0")}:${String(sec%60).padStart(2,"0")}`;}
+function addEventLog(type,detail,action){
+  const tbody=document.getElementById("event-log-tbody");if(!tbody)return;
+  const tr=document.createElement("tr");tr.className="hover:bg-slate-50/80 transition";
+  [new Date().toLocaleTimeString("th-TH"),type,detail,action].forEach((value,i)=>{const td=document.createElement("td");td.className=["py-2.5 px-3 font-mono text-slate-500","py-2.5 px-3 font-semibold text-slate-800","py-2.5 px-3 text-slate-600","py-2.5 px-3 text-right"][i];td.textContent=value;tr.appendChild(td);});
+  tbody.prepend(tr);while(tbody.children.length>100)tbody.lastElementChild.remove();
 }
